@@ -19,9 +19,9 @@ pathModuleUI <- function(id) {
           6,
           textInput(
             ns("path"),
-            "Seurat RDS Path",
+            "RDS File Path",
             value = "",
-            placeholder = "/path/to/seurat.rds"
+            placeholder = "/path/to/rds_file.rds"
           )
         ),
         column(
@@ -89,7 +89,7 @@ pathModuleServer <- function(id, remove_callback) {
         removeModal()
         showModal(modalDialog(
           title = "Error",
-          paste("Failed to load Seurat object:\n", e$message),
+          paste("Failed to load RDS file:\n", e$message),
           easyClose = TRUE,
           footer = modalButton("Close")
         ))
@@ -292,7 +292,7 @@ server <- function(input, output, session) {
     if (length(summary_blocks) == 0) {
       showModal(modalDialog(
         title = "No Data Loaded",
-        "Please load at least one Seurat object before generating.",
+        "Please load at least one RDS file before generating.",
         easyClose = TRUE
       ))
       return()
@@ -316,7 +316,7 @@ server <- function(input, output, session) {
     showModal(modalDialog(
       title = "Saving Path input",
       size = "l",
-      textInput("save_path", "Enter path to save new Seurat RDS file", value ="", placeholder = "path/to/new_file.rds", width = "100%"),
+      textInput("save_path", "Enter path to save new RDS file", value ="", placeholder = "path/to/new_file.rds", width = "100%"),
       easyClose = TRUE,
       footer = tagList(
         modalButton("Cancel"),
@@ -331,7 +331,7 @@ server <- function(input, output, session) {
     
     removeModal()
     showModal(modalDialog(
-      title = "Generating New Seurat Object",
+      title = "Generating New RDS file",
       paste("Subseting, Renaming and Merging Datasets..."),
       footer = NULL,
       easyClose = FALSE
@@ -392,7 +392,7 @@ server <- function(input, output, session) {
           y = processed_list[-1],
           collapse = FALSE,
           add.cell.ids = add_ids,
-          project = "MergedSeurat"
+          project = "SeuratObj"
         )
       }
       
@@ -400,7 +400,7 @@ server <- function(input, output, session) {
       merged_obj <- JoinLayers(merged_obj)
       
       showModal(modalDialog(
-        title = "Generating New Seurat Object",
+        title = "Generating New RDS file",
         paste("Saving to:", input$save_path),
         footer = NULL,
         easyClose = FALSE
@@ -412,7 +412,7 @@ server <- function(input, output, session) {
       removeModal()
       showModal(modalDialog(
         title = "Success",
-        paste("New Seurat object saved to:", input$save_path),
+        paste("New RDS file saved to:", input$save_path),
         easyClose = TRUE,
         footer = modalButton("Close")
       ))
@@ -421,7 +421,7 @@ server <- function(input, output, session) {
       removeModal()
       showModal(modalDialog(
         title = "Error",
-        paste("Failed to generate Seurat object:\n", e$message),
+        paste("Failed to generate RDS file:\n", e$message),
         easyClose = TRUE,
         footer = modalButton("Close")
       ))
