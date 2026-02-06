@@ -2,7 +2,7 @@ library(shiny)
 library(shinyjs)
 library(Seurat)
 library(ggplot2)
-
+library(tools)
 # ================================
 # UI for a single Seurat path module
 # ================================
@@ -164,12 +164,12 @@ pathModuleServer <- function(id, remove_callback) {
                   )
                 )
               )
-            }),
-            tags$hr()
+            })
           )
         })
       )
     })
+    
     
     # UI for numeric filters: violin plot + range slider
     output$numeric_filter_ui <- renderUI({
@@ -186,18 +186,15 @@ pathModuleServer <- function(id, remove_callback) {
           min_val <- floor(min(vals, na.rm = TRUE))
           max_val <- ceiling(max(vals, na.rm = TRUE))
           
-          slider_val <- local_rv$numeric_filter_range[[col]]
-          if (is.null(slider_val)) slider_val <- c(min_val, max_val)
-          
           tagList(
             tags$h5(col),
-            plotOutput(session$ns(paste0("violin_", col)), height = "150px"),
+            plotOutput(session$ns(paste0("violin_", col)), height = "100px"),
             fluidRow(
               column(6,
                      numericInput(
                        session$ns(paste0("min_", col)),
                        label = paste0("Min ", col),
-                       value = slider_val[1],
+                       value = min_val,
                        min = min_val,
                        max = max_val,
                        step = 1
@@ -207,7 +204,7 @@ pathModuleServer <- function(id, remove_callback) {
                      numericInput(
                        session$ns(paste0("max_", col)),
                        label = paste0("Max ", col),
-                       value = slider_val[2],
+                       value = max_val,
                        min = min_val,
                        max = max_val,
                        step = 1
@@ -218,6 +215,38 @@ pathModuleServer <- function(id, remove_callback) {
           )
         })
       )
+    })
+    
+    observe({
+      req(local_rv$obj_loaded, input$meta_col)
+      obj <- local_rv$obj
+      
+      meta_cols <- input$meta_col
+      numeric_cols <- meta_cols[sapply(obj@meta.data[meta_cols], is.numeric)]
+      
+      lapply(numeric_cols, function(col) {
+        vals <- obj@meta.data[[col]]
+        min_val <- floor(min(vals, na.rm = TRUE))
+        max_val <- ceiling(max(vals, na.rm = TRUE))
+        
+        slider_val <- local_rv$numeric_filter_range[[col]]
+        if (!is.null(slider_val)) {
+          updateNumericInput(
+            session,
+            paste0("min_", col),
+            value = slider_val[1],
+            min = min_val,
+            max = max_val
+          )
+          updateNumericInput(
+            session,
+            paste0("max_", col),
+            value = slider_val[2],
+            min = min_val,
+            max = max_val
+          )
+        }
+      })
     })
     
     # Render violin plots for numeric columns
@@ -234,7 +263,7 @@ pathModuleServer <- function(id, remove_callback) {
             df <- data.frame(value = obj@meta.data[[col_local]])
             ggplot(df, aes(x = "", y = value)) +
               geom_violin(trim = FALSE, fill = "lightblue", color = "gray40") +
-              geom_jitter(width = 0.1, alpha = 0.5, size = 0.1) +
+              geom_jitter(width = 0.3, alpha = 0.5, size = 0.1) +
               coord_flip() +
               theme_minimal() +
               labs(y = col_local, x = NULL) +
@@ -336,10 +365,13 @@ pathModuleServer <- function(id, remove_callback) {
 ui <- fluidPage(
   useShinyjs(),
   titlePanel("scRDS_DataCompiler"),
-  actionButton("add_path", "➕ Add RDS file"),
   tags$hr(),
   div(id = "path_container"),
-  actionButton("generate_new", "Generate New RDS File", class = "btn-success"),
+  fluidRow(
+    style = "margin-left: 0px;",
+    actionButton("add_path", "➕ Add RDS file"),
+    actionButton("generate_new", "Generate New RDS File", class = "btn-success")
+  ),
   br(),br(),br()
 )
 
@@ -415,8 +447,8 @@ server <- function(input, output, session) {
       # Log for compiler
       compiler_log[[id]] <<- list(
         path = path_val,
-        meta_map = choices,
-        numeric_map = numeric_ranges
+        numeric_map = numeric_ranges,
+        meta_map = choices
       )
       
       meta_blocks <- list()
@@ -425,9 +457,9 @@ server <- function(input, output, session) {
         meta_blocks <- c(meta_blocks, lapply(names(numeric_ranges), function(col) {
           rng <- numeric_ranges[[col]]
           tags$div(
+            br(),
             tags$h5(paste("Meta column:", col)),
-            tags$p(paste0("Range: ", rng[1], " to ", rng[2])),
-            br()
+            tags$p(paste0("&nbsp;&nbsp;&nbsp;&nbsp;Range: ", rng[1], " to ", rng[2]))
           )
         }))
       }
@@ -439,6 +471,7 @@ server <- function(input, output, session) {
             tags$p(strong(col), ": no values selected")
           } else {
             tags$div(
+              br(),
               tags$h5(paste("Meta column:", col)),
               tags$table(
                 class = "table table-condensed",
@@ -458,8 +491,7 @@ server <- function(input, output, session) {
                     )
                   })
                 )
-              ),
-              br()
+              )
             )
           }
         }))
@@ -659,10 +691,10 @@ server <- function(input, output, session) {
         if (merge_mode == "path_is_sample") {
           # Use path as sample identity
           if (length(add_ids) == 0) {
-            obj_sub@meta.data[[new_meta_name]] <- rep(basename(module$path()), ncol(obj_sub))
+            obj_sub@meta.data[[new_meta_name]] <- rep(file_path_sans_ext(basename(module$path())), ncol(obj_sub))
             merged_obj <- obj_sub
           } else {
-            obj_sub@meta.data[[new_meta_name]] <- rep(basename(module$path()), ncol(obj_sub))
+            obj_sub@meta.data[[new_meta_name]] <- rep(file_path_sans_ext(basename(module$path())), ncol(obj_sub))
             merged_obj <- merge(merged_obj, obj_sub)
           }
           add_ids <- c(add_ids, id)
