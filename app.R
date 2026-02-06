@@ -12,7 +12,7 @@ pathModuleUI <- function(id) {
   div(
     id = paste0(id, "_wrapper"),
     wellPanel(
-      h4(paste("Path", gsub(".*_", "", id))),
+      h4(paste("RDS File", gsub(".*_", "", id))),
       
       fluidRow(
         column(
@@ -182,11 +182,12 @@ pathModuleServer <- function(id, remove_callback) {
 # ================================
 ui <- fluidPage(
   useShinyjs(),
-  titlePanel("ScDataComposer"),
-  actionButton("add_path", "➕ Add Path"),
+  titlePanel("scRDS_DataCompiler"),
+  actionButton("add_path", "➕ Add RDS file"),
   tags$hr(),
   div(id = "path_container"),
-  actionButton("generate_new", "Generate New RDS File", class = "btn-success")
+  actionButton("generate_new", "Generate New RDS File", class = "btn-success"),
+  br(),br(),br()
 )
 
 # ================================
@@ -204,7 +205,7 @@ server <- function(input, output, session) {
   
   # Add a new path module dynamically
   observeEvent(input$add_path, {
-    new_id <- paste0("path_", rv$counter + 1)
+    new_id <- paste0("sample_", rv$counter + 1)
     rv$counter <- rv$counter + 1
     
     # Store the module ID
@@ -257,35 +258,56 @@ server <- function(input, output, session) {
   observeEvent(input$generate_new, {
     req(length(rv$path_ids) > 0)
     
+    compiler_log <- list()
+    
     summary_blocks <- lapply(rv$path_ids, function(id) {
       module <- rv$path_modules[[id]]
       if (is.null(module) || !module$obj_loaded()) return(NULL)
       
       path_val <- module$path()
       meta_col <- module$meta_col()
-      choices <- module$get_choices()
+      choices  <- module$get_choices()
+      
+      compiler_log[[id]] <<- list(
+        path       = path_val,
+        meta_col   = meta_col,
+        rename_map = if (length(choices) > 0) choices else NULL
+      )
       
       if (is.null(meta_col) || length(choices) == 0) {
         cluster_info <- tags$p(em("No clusters selected"))
       } else {
         cluster_info <- lapply(names(choices), function(val) {
-          tags$tr(tags$td(val), tags$td("→"), tags$td(choices[[val]]))
+          tags$tr(
+            tags$td(val),
+            tags$td("→"),
+            tags$td(choices[[val]])
+          )
         })
         
         cluster_info <- tags$table(
           class = "table table-condensed",
-          tags$thead(tags$tr(tags$th("Original"), tags$th(""), tags$th("Renamed To"))),
+          tags$thead(
+            tags$tr(
+              tags$th("Original"),
+              tags$th(""),
+              tags$th("Renamed To")
+            )
+          ),
           tags$tbody(cluster_info)
         )
       }
       
       tagList(
         tags$hr(),
-        tags$h4(tags$b("Path: "), path_val),
+        tags$h4(tags$b("Input RDS File: "), path_val),
         tags$p(tags$b("Meta column: "), meta_col),
         cluster_info
       )
     })
+    
+    compiler_log <- Filter(Negate(is.null), compiler_log)
+    rv$compiler_log <- compiler_log
     
     summary_blocks <- Filter(Negate(is.null), summary_blocks)
     
@@ -314,9 +336,26 @@ server <- function(input, output, session) {
   observeEvent(input$confirm_generate, {
     removeModal()
     showModal(modalDialog(
-      title = "Saving Path input",
+      title = "Saving RDS file",
       size = "l",
-      textInput("save_path", "Enter path to save new RDS file", value ="", placeholder = "path/to/new_file.rds", width = "100%"),
+      
+      textInput("new_meta_name", "the meta.data column name in new RDS file after processing",
+                value = "SampleID", placeholder = "SampleID_xxxx"),
+      radioButtons(
+        "merge_mode",
+        "How should Input RDS files be interpreted?",
+        choices = c(
+          "Mode 1: Input RDS files contain multiple samples" = "rename_based",
+          "Mode 2: Each Input RDS file corresponds to a single sample" = "path_is_sample"
+        )
+      ),
+      uiOutput("merge_description"),
+      hr(),
+      textInput("save_path", "Enter path to save new RDS file",
+                value ="",
+                placeholder = "path/to/new_file.rds",
+                width = "100%"),
+      uiOutput("save_path_error"),
       easyClose = TRUE,
       footer = tagList(
         modalButton("Cancel"),
@@ -325,11 +364,62 @@ server <- function(input, output, session) {
     ))
   })
   
+  output$merge_description <- renderUI({
+    req(input$merge_mode)
+    
+    if (input$merge_mode == "rename_based") {
+      HTML(
+        "
+      - Each RDS file may contain multiple samples.<br>
+      - The new metadata column will be created based on your renamed cluster labels after subsetting.<br><br>
+      <b>Example:</b><br>
+      &nbsp;&nbsp;&nbsp;&bull; Input RDS files 1: sample1, sample2<br>
+      &nbsp;&nbsp;&nbsp;&bull; Input RDS files 2: sample3, sample4<br><br>
+      <b>After merging, new metadata column will contain:</b><br>
+      sample1, sample2, sample3, sample4"
+      )
+      
+    } else {
+      HTML(
+        "
+      - Each RDS file represents one independent sample.<br>
+      - The new metadata column will be created using Path names.<br>
+      - Cluster renaming does NOT affect sample identity.<br><br>
+      <b>Example:</b><br>
+      &nbsp;&nbsp;&nbsp;&bull; Input RDS files 1 (sample1): biological cluster1<br>
+      &nbsp;&nbsp;&nbsp;&bull; Input RDS files 2 (sample2): biological cluster1<br><br>
+      <b>After merging, new metadata column will contain:</b><br>
+      sample1, sample2"
+      )
+    }
+  })
+  
+  output$save_path_error <- renderUI({
+    if (is.null(input$save_path) || input$save_path == "") return(NULL)
+    if (!grepl("\\.rds$", input$save_path, ignore.case = TRUE)) {
+      tags$div(style = "color: red;", "Error: path must end with .rds.")
+    } else if (!dir.exists(dirname(input$save_path))) {
+      tags$div(style = "color: orange;", "Warning: directory does not exist, folders will be generated automatically.")
+    } else {
+      tags$div(style = "color: green;", "Correct Path, Click \"Save\" to start processing.")
+    }
+  })
+  
   # Confirm saving the new RDS file
   observeEvent(input$confirm_saving, {
     req(input$save_path)
-    
     removeModal()
+    
+    if (!grepl("\\.rds$", input$save_path, ignore.case = TRUE)) {
+      showModal(modalDialog(
+        title = "Saving Path Input Error",
+        "Saving Path must end with .rds",
+        easyClose = TRUE,
+        footer = modalButton("Close")
+      ))
+      return()
+    }
+    
     showModal(modalDialog(
       title = "Generating New RDS file",
       paste("Subseting, Renaming and Merging Datasets..."),
@@ -338,11 +428,16 @@ server <- function(input, output, session) {
     ))
     
     tryCatch({
-
+      dir_path <- dirname(input$save_path)
+      if (!dir.exists(dir_path)) {
+        dir.create(dir_path, recursive = TRUE)
+      }
+      new_meta_name <- input$new_meta_name
+      merge_mode <- input$merge_mode
+      
       processed_list <- list()
       add_ids <- c()
       
-      # Loop through all active path modules
       for (id in rv$path_ids) {
         
         module <- rv$path_modules[[id]]
@@ -364,10 +459,19 @@ server <- function(input, output, session) {
         new_labels <- choices[obj_sub@meta.data[[meta_col]]]
         obj_sub@meta.data[, meta_col] <- as.character(unname(new_labels))
         
+        if (merge_mode == "rename_based") {
+          obj_sub[[new_meta_name]] <- obj_sub@meta.data[, meta_col]
+        } else if (merge_mode == "path_is_sample") {
+          obj_sub[[new_meta_name]] <- id
+        } else {
+          obj_sub[[new_meta_name]] <- id
+        }
+        
         # Store processed object
         processed_list[[id]] <- obj_sub
         add_ids <- c(add_ids, id)
       }
+      
       
       # Ensure at least one dataset remains
       if (length(processed_list) == 0) {
@@ -395,9 +499,24 @@ server <- function(input, output, session) {
           project = "SeuratObj"
         )
       }
-      
+      rna_assay <- merged_obj[["RNA"]]
       # Join layers (important for Seurat v5 objects)
-      merged_obj <- JoinLayers(merged_obj)
+      if (inherits(rna_assay, "Assay5")) {
+        layer_names <- Layers(rna_assay)
+        if (length(layer_names) > 1) {
+          message("Joining layers in RNA assay...")
+          merged_obj[["RNA"]] <- JoinLayers(rna_assay)
+        } else {
+          message("RNA assay has a single layer. No join needed.")
+        }
+      } else {
+        message("RNA assay is v4-style Assay. JoinLayers not applicable.")
+      }
+      
+      merged_obj@commands$scRDS_DataCompiler <- list(
+        timestamp = Sys.time(),
+        paths     = rv$compiler_log
+      )
       
       showModal(modalDialog(
         title = "Generating New RDS file",
