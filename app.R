@@ -1,14 +1,13 @@
 library(shiny)
 library(shinyjs)
 library(Seurat)
+library(ggplot2)
 
 # ================================
 # UI for a single Seurat path module
 # ================================
 pathModuleUI <- function(id) {
   ns <- NS(id)
-  
-  # Wrap the whole module in a div with unique ID for removal
   div(
     id = paste0(id, "_wrapper"),
     wellPanel(
@@ -37,6 +36,7 @@ pathModuleUI <- function(id) {
       ),
       
       uiOutput(ns("meta_ui")),
+      uiOutput(ns("numeric_filter_ui")),  # UI output for numeric filters and violins
       uiOutput(ns("subset_ui"))
     )
   )
@@ -48,14 +48,14 @@ pathModuleUI <- function(id) {
 pathModuleServer <- function(id, remove_callback) {
   moduleServer(id, function(input, output, session) {
     
-    # Local reactive state for this module only
     local_rv <- reactiveValues(
       obj = NULL,
       path_value = "",
-      obj_loaded = FALSE
+      obj_loaded = FALSE,
+      numeric_filter_range = NULL  # Store numeric filter ranges here
     )
-    
-    # Enable/disable inputs based on load state
+
+    # Enable/disable inputs based on load status
     observe({
       if (local_rv$obj_loaded) {
         shinyjs::disable("path")
@@ -68,7 +68,7 @@ pathModuleServer <- function(id, remove_callback) {
       }
     })
     
-    # Load Seurat object from RDS
+    # Load the Seurat object from provided RDS path
     observeEvent(input$load, {
       req(input$path)
       
@@ -84,6 +84,9 @@ pathModuleServer <- function(id, remove_callback) {
         local_rv$obj <- obj
         local_rv$path_value <- input$path
         local_rv$obj_loaded <- TRUE
+        
+        isolate({ local_rv$numeric_filter_range <- list() })  # Reset numeric filter ranges
+        
         removeModal()
       }, error = function(e) {
         removeModal()
@@ -96,82 +99,232 @@ pathModuleServer <- function(id, remove_callback) {
       })
     })
     
-    # Reset module state
+    # Reset module to initial state
     observeEvent(input$reset, {
       local_rv$obj <- NULL
       local_rv$obj_loaded <- FALSE
       updateTextInput(session, "path", value = "")
+      
+      isolate({ local_rv$numeric_filter_range <- list() })
     })
     
-    # Remove this module from UI and server
+    # Remove module UI and server instance
     observeEvent(input$remove, {
       remove_callback(id)
     })
     
-    # UI for selecting a metadata column
+    # UI to select meta.data columns (exclude "CB")
     output$meta_ui <- renderUI({
       req(local_rv$obj_loaded)
       obj <- local_rv$obj
       
-      # Keep only non-numeric metadata columns
-      non_num <- names(obj@meta.data)[!sapply(obj@meta.data, is.numeric)]
-      choices <- setdiff(non_num, "CB")
+      cols <- colnames(obj@meta.data)
+      choices <- setdiff(cols, "CB")
       
-      selectInput(session$ns("meta_col"), "Select meta.data column", choices = choices)
+      selectInput(
+        session$ns("meta_col"),
+        "Select meta.data column(s)",
+        choices = choices,
+        multiple = TRUE
+      )
     })
     
-    # UI for subsetting and renaming cluster labels
+    # UI for filtering character meta columns: checkbox + rename text input
     output$subset_ui <- renderUI({
       req(local_rv$obj_loaded, input$meta_col)
       obj <- local_rv$obj
-      col <- input$meta_col
       
-      if (is.null(col) || !col %in% colnames(obj@meta.data)) {
-        return(NULL)
-      }
-      
-      vals <- sort(unique(obj@meta.data[[col]]))
+      meta_cols <- input$meta_col
+      # Only non-numeric columns here
+      non_numeric_cols <- meta_cols[!sapply(obj@meta.data[meta_cols], is.numeric)]
+      if (length(non_numeric_cols) == 0) return(NULL)
       
       tagList(
-        lapply(vals, function(val) {
-          safe <- make.names(val)
-          fluidRow(
-            column(
-              4,
-              checkboxInput(session$ns(paste0("keep_", safe)), label = val, value = TRUE)
-            ),
-            column(
-              8,
-              textInput(session$ns(paste0("rename_", safe)), label = NULL, value = val)
-            )
+        lapply(non_numeric_cols, function(col) {
+          vals <- sort(unique(obj@meta.data[[col]]))
+          tagList(
+            tags$h5(col),
+            lapply(vals, function(val) {
+              safe <- make.names(paste(col, val, sep = "__"))
+              fluidRow(
+                column(
+                  4,
+                  checkboxInput(
+                    session$ns(paste0("keep_", safe)),
+                    label = val,
+                    value = TRUE
+                  )
+                ),
+                column(
+                  8,
+                  textInput(
+                    session$ns(paste0("rename_", safe)),
+                    label = NULL,
+                    value = val
+                  )
+                )
+              )
+            }),
+            tags$hr()
           )
         })
       )
     })
     
-    # Return reactive accessors to parent server
+    # UI for numeric filters: violin plot + range slider
+    output$numeric_filter_ui <- renderUI({
+      req(local_rv$obj_loaded, input$meta_col)
+      obj <- local_rv$obj
+      
+      meta_cols <- input$meta_col
+      numeric_cols <- meta_cols[sapply(obj@meta.data[meta_cols], is.numeric)]
+      if (length(numeric_cols) == 0) return(NULL)
+      
+      tagList(
+        lapply(numeric_cols, function(col) {
+          vals <- obj@meta.data[[col]]
+          min_val <- floor(min(vals, na.rm = TRUE))
+          max_val <- ceiling(max(vals, na.rm = TRUE))
+          
+          slider_val <- local_rv$numeric_filter_range[[col]]
+          if (is.null(slider_val)) slider_val <- c(min_val, max_val)
+          
+          tagList(
+            tags$h5(col),
+            plotOutput(session$ns(paste0("violin_", col)), height = "150px"),
+            fluidRow(
+              column(6,
+                     numericInput(
+                       session$ns(paste0("min_", col)),
+                       label = paste0("Min ", col),
+                       value = slider_val[1],
+                       min = min_val,
+                       max = max_val,
+                       step = 1
+                     )
+              ),
+              column(6,
+                     numericInput(
+                       session$ns(paste0("max_", col)),
+                       label = paste0("Max ", col),
+                       value = slider_val[2],
+                       min = min_val,
+                       max = max_val,
+                       step = 1
+                     )
+              )
+            ),
+            tags$hr()
+          )
+        })
+      )
+    })
+    
+    # Render violin plots for numeric columns
+    observe({
+      req(local_rv$obj_loaded, input$meta_col)
+      obj <- local_rv$obj
+      meta_cols <- input$meta_col
+      numeric_cols <- meta_cols[sapply(obj@meta.data[meta_cols], is.numeric)]
+      
+      for (col in numeric_cols) {
+        local({
+          col_local <- col
+          output[[paste0("violin_", col_local)]] <- renderPlot({
+            df <- data.frame(value = obj@meta.data[[col_local]])
+            ggplot(df, aes(x = "", y = value)) +
+              geom_violin(trim = FALSE, fill = "lightblue", color = "gray40") +
+              geom_jitter(width = 0.1, alpha = 0.5, size = 0.1) +
+              coord_flip() +
+              theme_minimal() +
+              labs(y = col_local, x = NULL) +
+              theme(axis.text.x = element_text(), axis.ticks.x = element_line()) +
+              scale_y_continuous(breaks = scales::pretty_breaks(n = 6))
+          })
+        })
+      }
+    })
+    
+    # Update numeric_filter_range when sliders change
+    observe({
+      req(local_rv$obj_loaded, input$meta_col)
+      meta_cols <- input$meta_col
+      obj <- local_rv$obj
+      
+      numeric_cols <- meta_cols[sapply(obj@meta.data[meta_cols], is.numeric)]
+      
+      for (col in numeric_cols) {
+        local({
+          col_local <- col
+          min_id <- paste0("min_", col_local)
+          max_id <- paste0("max_", col_local)
+          
+          observeEvent({
+            input[[min_id]]
+          }, {
+            isolate({
+              if (is.null(local_rv$numeric_filter_range)) local_rv$numeric_filter_range <- list()
+              current_max <- local_rv$numeric_filter_range[[col_local]][2] %||% Inf
+              min_val <- input[[min_id]]
+              if (!is.null(min_val) && min_val <= current_max) {
+                local_rv$numeric_filter_range[[col_local]][1] <- min_val
+              }
+            })
+          }, ignoreInit = TRUE)
+          
+          observeEvent({
+            input[[max_id]]
+          }, {
+            isolate({
+              if (is.null(local_rv$numeric_filter_range)) local_rv$numeric_filter_range <- list()
+              current_min <- local_rv$numeric_filter_range[[col_local]][1] %||% -Inf
+              max_val <- input[[max_id]]
+              if (!is.null(max_val) && max_val >= current_min) {
+                local_rv$numeric_filter_range[[col_local]][2] <- max_val
+              }
+            })
+          }, ignoreInit = TRUE)
+        })
+      }
+    })
+    
+    
+    # Return reactive values for parent server to use
     list(
       obj = reactive({ local_rv$obj }),
       path = reactive({ local_rv$path_value }),
       obj_loaded = reactive({ local_rv$obj_loaded }),
       meta_col = reactive({ input$meta_col }),
+      numeric_filter_range = reactive({ local_rv$numeric_filter_range }),
       get_choices = reactive({
         req(local_rv$obj_loaded, input$meta_col)
-        obj <- local_rv$obj
-        col <- input$meta_col
-        vals <- sort(unique(obj@meta.data[[col]]))
         
-        choices <- list()
-        for (val in vals) {
-          safe <- make.names(val)
-          keep_id <- paste0("keep_", safe)
-          rename_id <- paste0("rename_", safe)
-          
-          if (!is.null(input[[keep_id]]) && input[[keep_id]]) {
-            choices[[val]] <- input[[rename_id]]
+        obj <- local_rv$obj
+        out <- list()
+        
+        # Only character meta columns have choices (checkbox + rename)
+        for (col in input$meta_col) {
+          if (!is.numeric(obj@meta.data[[col]])) {
+            vals <- sort(unique(obj@meta.data[[col]]))
+            col_choices <- list()
+            
+            for (val in vals) {
+              safe <- make.names(paste(col, val, sep = "__"))
+              keep_id <- paste0("keep_", safe)
+              rename_id <- paste0("rename_", safe)
+              
+              if (!is.null(input[[keep_id]]) && input[[keep_id]]) {
+                col_choices[[val]] <- input[[rename_id]]
+              }
+            }
+            
+            if (length(col_choices) > 0) {
+              out[[col]] <- col_choices
+            }
           }
         }
-        choices
+        
+        out
       })
     )
   })
@@ -195,58 +348,47 @@ ui <- fluidPage(
 # ================================
 server <- function(input, output, session) {
   
-  # Reactive values to track modules
   rv <- reactiveValues(
     path_ids = character(),
     path_modules = list(),
     counter = 0,
-    initialized = FALSE
+    initialized = FALSE,
+    compiler_log = NULL
   )
-  
-  # Add a new path module dynamically
+  filter_summary_rv <- reactiveValues(
+    compiler_log = NULL
+  )
+  # Add new path module dynamically
   observeEvent(input$add_path, {
     new_id <- paste0("sample_", rv$counter + 1)
     rv$counter <- rv$counter + 1
     
-    # Store the module ID
     isolate({
       rv$path_ids <- c(rv$path_ids, new_id)
     })
     
-    # Insert the module UI
     insertUI(
       selector = "#path_container",
       where = "beforeEnd",
       ui = pathModuleUI(new_id)
     )
     
-    # Define the removal callback function
-    # This will be called when the module's delete button is clicked
     remove_callback <- function(module_id) {
-      # Remove from reactive values
       isolate({
         rv$path_ids <- setdiff(rv$path_ids, module_id)
         rv$path_modules[[module_id]] <- NULL
       })
-      
-      # Remove the UI element
-      # Use the wrapper ID we defined in pathModuleUI
-      removeUI(
-        selector = paste0("#", module_id, "_wrapper")
-      )
+      removeUI(selector = paste0("#", module_id, "_wrapper"))
     }
     
-    # Initialize the server module
     module <- pathModuleServer(new_id, remove_callback)
     
-    # Store the module reference
     isolate({
       rv$path_modules[[new_id]] <- module
     })
   })
   
-  # Create the first module on app start (only once)
-  # Using a flag to ensure it runs only once
+  # Automatically add first module on app start
   observe({
     if (!rv$initialized) {
       rv$initialized <- TRUE
@@ -254,7 +396,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # Summary before generating new object
+  # Show summary modal before generating new object
   observeEvent(input$generate_new, {
     req(length(rv$path_ids) > 0)
     
@@ -265,57 +407,87 @@ server <- function(input, output, session) {
       if (is.null(module) || !module$obj_loaded()) return(NULL)
       
       path_val <- module$path()
-      meta_col <- module$meta_col()
-      choices  <- module$get_choices()
+      meta_cols <- module$meta_col()
+      choices <- module$get_choices()
+      numeric_ranges <- module$numeric_filter_range()
+      numeric_ranges <- if (is.null(numeric_ranges)) list() else numeric_ranges
       
+      # Log for compiler
       compiler_log[[id]] <<- list(
-        path       = path_val,
-        meta_col   = meta_col,
-        rename_map = if (length(choices) > 0) choices else NULL
+        path = path_val,
+        meta_map = choices,
+        numeric_map = numeric_ranges
       )
       
-      if (is.null(meta_col) || length(choices) == 0) {
-        cluster_info <- tags$p(em("No clusters selected"))
-      } else {
-        cluster_info <- lapply(names(choices), function(val) {
-          tags$tr(
-            tags$td(val),
-            tags$td("→"),
-            tags$td(choices[[val]])
+      meta_blocks <- list()
+      
+      if (length(numeric_ranges) > 0) {
+        meta_blocks <- c(meta_blocks, lapply(names(numeric_ranges), function(col) {
+          rng <- numeric_ranges[[col]]
+          tags$div(
+            tags$h5(paste("Meta column:", col)),
+            tags$p(paste0("Range: ", rng[1], " to ", rng[2])),
+            br()
           )
-        })
-        
-        cluster_info <- tags$table(
-          class = "table table-condensed",
-          tags$thead(
-            tags$tr(
-              tags$th("Original"),
-              tags$th(""),
-              tags$th("Renamed To")
+        }))
+      }
+      
+      if (length(choices) > 0) {
+        meta_blocks <- c(meta_blocks, lapply(names(choices), function(col) {
+          rename_map <- choices[[col]]
+          if (length(rename_map) == 0) {
+            tags$p(strong(col), ": no values selected")
+          } else {
+            tags$div(
+              tags$h5(paste("Meta column:", col)),
+              tags$table(
+                class = "table table-condensed",
+                tags$thead(
+                  tags$tr(
+                    tags$th("Original"),
+                    tags$th(""),
+                    tags$th("Renamed To")
+                  )
+                ),
+                tags$tbody(
+                  lapply(names(rename_map), function(old) {
+                    tags$tr(
+                      tags$td(old),
+                      tags$td("→"),
+                      tags$td(rename_map[[old]])
+                    )
+                  })
+                )
+              ),
+              br()
             )
-          ),
-          tags$tbody(cluster_info)
-        )
+          }
+        }))
+      }
+      
+      if (length(meta_blocks) == 0) {
+        meta_blocks <- list(tags$p(em("No meta.data filters selected.")))
       }
       
       tagList(
         tags$hr(),
         tags$h4(tags$b("Input RDS File: "), path_val),
-        tags$p(tags$b("Meta column: "), meta_col),
-        cluster_info
+        meta_blocks
       )
     })
     
-    compiler_log <- Filter(Negate(is.null), compiler_log)
-    rv$compiler_log <- compiler_log
-    
+    # Clean NULLs
     summary_blocks <- Filter(Negate(is.null), summary_blocks)
+    compiler_log <- Filter(Negate(is.null), compiler_log)
+    
+    filter_summary_rv$compiler_log <- compiler_log
     
     if (length(summary_blocks) == 0) {
       showModal(modalDialog(
         title = "No Data Loaded",
         "Please load at least one RDS file before generating.",
-        easyClose = TRUE
+        easyClose = TRUE,
+        footer = modalButton("Close")
       ))
       return()
     }
@@ -332,15 +504,16 @@ server <- function(input, output, session) {
     ))
   })
   
-  # Confirm generation of new RDS file
+  # Show modal to configure saving options after confirm
   observeEvent(input$confirm_generate, {
     removeModal()
     showModal(modalDialog(
       title = "Saving RDS file",
       size = "l",
       
-      textInput("new_meta_name", "the meta.data column name in new RDS file after processing",
+      textInput("new_meta_name", "Meta.data column name in new RDS file after processing",
                 value = "SampleID", placeholder = "SampleID_xxxx"),
+      
       radioButtons(
         "merge_mode",
         "How should Input RDS files be interpreted?",
@@ -349,6 +522,7 @@ server <- function(input, output, session) {
           "Mode 2: Each Input RDS file corresponds to a single sample" = "path_is_sample"
         )
       ),
+      
       uiOutput("merge_description"),
       hr(),
       textInput("save_path", "Enter path to save new RDS file",
@@ -357,6 +531,7 @@ server <- function(input, output, session) {
                 width = "100%"),
       uiOutput("save_path_error"),
       easyClose = TRUE,
+      
       footer = tagList(
         modalButton("Cancel"),
         actionButton("confirm_saving", "Save", class = "btn btn-success")
@@ -405,7 +580,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # Confirm saving the new RDS file
+  # Handle final saving
   observeEvent(input$confirm_saving, {
     req(input$save_path)
     removeModal()
@@ -422,7 +597,7 @@ server <- function(input, output, session) {
     
     showModal(modalDialog(
       title = "Generating New RDS file",
-      paste("Subseting, Renaming and Merging Datasets..."),
+      paste("Subsetting, Renaming and Merging Datasets..."),
       footer = NULL,
       easyClose = FALSE
     ))
@@ -439,84 +614,88 @@ server <- function(input, output, session) {
       add_ids <- c()
       
       for (id in rv$path_ids) {
-        
         module <- rv$path_modules[[id]]
         if (is.null(module) || !module$obj_loaded()) next
         
         obj <- module$obj()
-        meta_col <- module$meta_col()
+        meta_cols <- module$meta_col()
         choices <- module$get_choices()
+        numeric_ranges <- module$numeric_filter_range()
         
-        # Skip if nothing selected
-        if (is.null(meta_col) || length(choices) == 0) next
+        if (is.null(meta_cols) || (length(choices) == 0 && length(numeric_ranges) == 0)) next
         
-        # Keep only selected groups
-        keep_vals <- names(choices)
-        cells_keep <- rownames(obj@meta.data)[obj@meta.data[[meta_col]] %in% keep_vals]
-        obj_sub <- subset(obj, cells = cells_keep)
+        cells_keep_list <- list()
         
-        # Rename cluster labels
-        new_labels <- choices[obj_sub@meta.data[[meta_col]]]
-        obj_sub@meta.data[, meta_col] <- as.character(unname(new_labels))
-        
-        if (merge_mode == "rename_based") {
-          obj_sub[[new_meta_name]] <- obj_sub@meta.data[, meta_col]
-        } else if (merge_mode == "path_is_sample") {
-          obj_sub[[new_meta_name]] <- id
-        } else {
-          obj_sub[[new_meta_name]] <- id
-        }
-        
-        # Store processed object
-        processed_list[[id]] <- obj_sub
-        add_ids <- c(add_ids, id)
-      }
-      
-      
-      # Ensure at least one dataset remains
-      if (length(processed_list) == 0) {
-        stop("No valid datasets available after subsetting.")
-      }
-      # Merge Seurat objects
-      if (length(processed_list) == 1) {
-        merged_obj <- processed_list[[1]]
-      } else {
-        common_features <- Reduce(intersect, lapply(processed_list, rownames))
-        processed_list <- lapply(processed_list, function(obj) {
-          subset(obj, features = common_features)
-        })
-        processed_list <- lapply(processed_list, function(obj) {
-          if ("SCT" %in% Assays(obj)) {
-            obj[["SCT"]] <- NULL
+        # Filter by character meta columns
+        if (length(choices) > 0) {
+          for (col in names(choices)) {
+            keep_vals <- names(choices[[col]])
+            cells_keep_list[[col]] <- rownames(obj@meta.data)[obj@meta.data[[col]] %in% keep_vals]
           }
-          obj
-        })
-        merged_obj <- merge(
-          x = processed_list[[1]],
-          y = processed_list[-1],
-          collapse = FALSE,
-          add.cell.ids = add_ids,
-          project = "SeuratObj"
-        )
-      }
-      rna_assay <- merged_obj[["RNA"]]
-      # Join layers (important for Seurat v5 objects)
-      if (inherits(rna_assay, "Assay5")) {
-        layer_names <- Layers(rna_assay)
-        if (length(layer_names) > 1) {
-          message("Joining layers in RNA assay...")
-          merged_obj[["RNA"]] <- JoinLayers(rna_assay)
-        } else {
-          message("RNA assay has a single layer. No join needed.")
         }
-      } else {
-        message("RNA assay is v4-style Assay. JoinLayers not applicable.")
+        
+        # Filter by numeric meta columns (range)
+        if (length(numeric_ranges) > 0) {
+          for (col in names(numeric_ranges)) {
+            rng <- numeric_ranges[[col]]
+            cells_keep_list[[col]] <- rownames(obj@meta.data)[
+              obj@meta.data[[col]] >= rng[1] & obj@meta.data[[col]] <= rng[2]
+            ]
+          }
+        }
+        
+        # Intersect all filtering criteria
+        if (length(cells_keep_list) == 0) next
+        final_cells <- Reduce(intersect, cells_keep_list)
+        obj_sub <- subset(obj, cells = final_cells)
+        
+        # Rename clusters in character meta columns
+        for (col in names(choices)) {
+          new_labels <- choices[[col]][obj_sub@meta.data[[col]]]
+          obj_sub@meta.data[[col]] <- unname(as.character(new_labels))
+        }
+        
+        # Merge logic based on mode
+        if (merge_mode == "path_is_sample") {
+          # Use path as sample identity
+          if (length(add_ids) == 0) {
+            obj_sub@meta.data[[new_meta_name]] <- rep(basename(module$path()), ncol(obj_sub))
+            merged_obj <- obj_sub
+          } else {
+            obj_sub@meta.data[[new_meta_name]] <- rep(basename(module$path()), ncol(obj_sub))
+            merged_obj <- merge(merged_obj, obj_sub)
+          }
+          add_ids <- c(add_ids, id)
+          
+        } else if (merge_mode == "rename_based") {
+          # Rename based on cluster renaming (for all meta columns)
+          if (length(add_ids) == 0) {
+            new_meta_col_values <- paste0(
+              do.call(paste, c(obj_sub@meta.data[names(choices)], sep = "_"))
+            )
+            obj_sub@meta.data[[new_meta_name]] <- new_meta_col_values
+            merged_obj <- obj_sub
+          } else {
+            new_meta_col_values <- paste0(
+              do.call(paste, c(obj_sub@meta.data[names(choices)], sep = "_"))
+            )
+            obj_sub@meta.data[[new_meta_name]] <- new_meta_col_values
+            merged_obj <- merge(merged_obj, obj_sub)
+          }
+          add_ids <- c(add_ids, id)
+        }
       }
       
-      merged_obj@commands$scRDS_DataCompiler <- list(
-        timestamp = Sys.time(),
-        paths     = rv$compiler_log
-      )
+      if (length(add_ids) == 0) {
+        removeModal()
+        showModal(modalDialog(
+          title = "No Cells Selected",
+          "No cells passed the filtering criteria in any loaded RDS file.",
+          easyClose = TRUE,
+          footer = modalButton("Close")
+        ))
+        return()
+      }
       
       showModal(modalDialog(
         title = "Generating New RDS file",
@@ -525,13 +704,26 @@ server <- function(input, output, session) {
         easyClose = FALSE
       ))
       
-      # Save final object
-      saveRDS(merged_obj, file = input$save_path)
-      gc()
+      commands_list <- list()
+      for (id in rv$path_ids) {
+        module <- rv$path_modules[[id]]
+        if (is.null(module) || !module$obj_loaded()) next
+        
+        obj <- module$obj()
+        if (!is.null(obj@commands)) {
+          commands_list[[id]] <- obj@commands
+        }
+      }
+
+      filter_log <- filter_summary_rv$compiler_log
+      
+      merged_obj@commands <- filter_log
+      saveRDS(merged_obj, input$save_path)
       removeModal()
+      
       showModal(modalDialog(
         title = "Success",
-        paste("New RDS file saved to:", input$save_path),
+        paste("New RDS file saved successfully to:", input$save_path),
         easyClose = TRUE,
         footer = modalButton("Close")
       ))
@@ -540,13 +732,15 @@ server <- function(input, output, session) {
       removeModal()
       showModal(modalDialog(
         title = "Error",
-        paste("Failed to generate RDS file:\n", e$message),
+        paste("Error during processing:\n", e$message),
         easyClose = TRUE,
         footer = modalButton("Close")
       ))
     })
   })
-  
 }
 
+# ================================
+# Run the app
+# ================================
 shinyApp(ui, server)
